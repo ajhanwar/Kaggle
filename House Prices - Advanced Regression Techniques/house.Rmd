@@ -1,0 +1,174 @@
+---
+title: "Regression Techniques"
+author: "Aditya Jhanwar"
+date: "12/31/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, comment = "")
+setwd("~/kaggle/house/")
+rm(list=ls())
+library(tidyverse)
+library(forcats) # fct_explicit_na()
+library(DMwR)
+library(caret) # trainControl()
+library(splines)
+library(glmnet) # ridge and lasso
+```
+
+# EDA
+
+From analysis of the data description, it appears we have numerical and categorcial explanatory variables. Features which represented counts (e.g. number fireplaces, full bathrooms, etc.) were assigned as numerical values for simplicity.
+
+```{r load.train.data}
+train = read_csv("train.csv", 
+                 col_types = cols(.default      = col_factor(),
+                                  Id            = col_integer(),
+                                  LotFrontage   = col_double(),
+                                  LotArea       = col_double(),
+                                  YearBuilt     = col_double(),
+                                  YearRemodAdd  = col_double(),
+                                  MasVnrArea    = col_double(),
+                                  BsmtFinSF1    = col_double(),
+                                  BsmtFinSF2    = col_double(),
+                                  BsmtUnfSF     = col_double(),
+                                  TotalBsmtSF   = col_double(),
+                                  "1stFlrSF"    = col_double(),
+                                  "2ndFlrSF"    = col_double(),
+                                  LowQualFinSF  = col_double(),
+                                  GarageYrBlt   = col_double(),
+                                  GrLivArea     = col_double(),
+                                  BsmtFullBath  = col_double(),
+                                  BsmtHalfBath  = col_double(),
+                                  FullBath      = col_double(),
+                                  HalfBath      = col_double(),
+                                  BedroomAbvGr  = col_double(),
+                                  KitchenAbvGr  = col_double(),
+                                  TotRmsAbvGrd  = col_double(),
+                                  Fireplaces    = col_double(),
+                                  GarageCars    = col_double(),
+                                  GarageArea    = col_double(),
+                                  WoodDeckSF    = col_double(),
+                                  OpenPorchSF   = col_double(),
+                                  EnclosedPorch = col_double(),
+                                  "3SsnPorch"   = col_double(),
+                                  ScreenPorch   = col_double(),
+                                  PoolArea      = col_double(),
+                                  MiscVal       = col_double(),
+                                  MoSold        = col_double(),
+                                  YrSold        = col_double(),
+                                  SalePrice     = col_double()))
+```
+
+Now that I have imported the data with the appropriate data types, the next step is to look into the data itself. 
+
+```{r dim.train}
+dim(train)
+```
+
+It appears that there are `80` explanatory variables and `1460` observations.
+
+According to the data description, some of `NA` values for specific categorical features represent a value in and of itself. I'll replace these values with a categorical value of `None`.
+
+```{r}
+na.is.fine = c("Alley", "MasVnrType", "BsmtQual", "BsmtCond",
+               "BsmtExposure", "BsmtFinType1", "BsmtFinType2",
+               "FireplaceQu", "GarageType", "GarageFinish",
+               "GarageQual", "GarageYrBlt","GarageCond", 
+               "PoolQC", "Fence", "MiscFeature")
+
+train$Alley = fct_explicit_na(train$Alley, "None")
+train$MasVnrType = fct_explicit_na(train$MasVnrType, "None")
+train$BsmtQual = fct_explicit_na(train$BsmtQual, "None")
+train$BsmtCond = fct_explicit_na(train$BsmtCond, "None")
+train$BsmtExposure = fct_explicit_na(train$BsmtExposure, "None")
+train$BsmtFinType1 = fct_explicit_na(train$BsmtFinType1, "None")
+train$BsmtFinType2 = fct_explicit_na(train$BsmtFinType2, "None")
+train$FireplaceQu = fct_explicit_na(train$FireplaceQu, "None")
+train$GarageType = fct_explicit_na(train$GarageType, "None")
+train$GarageFinish = fct_explicit_na(train$GarageFinish, "None")
+train$GarageQual = fct_explicit_na(train$GarageQual, "None")
+train$GarageCond = fct_explicit_na(train$GarageCond, "None")
+train$PoolQC = fct_explicit_na(train$PoolQC, "None")
+train$Fence = fct_explicit_na(train$Fence, "None")
+train$MiscFeature = fct_explicit_na(train$MiscFeature, "None")
+```
+
+Now that I have accounted for all data manipulations as required, I'd like to take a look into what features have remaining missing information. 
+
+```{r nulls}
+colSums(is.na(train))[colSums(is.na(train)) > 0]
+```
+
+The data description lists `LotFrontage` as the linear feet of street connected to property. Some homes may not have such a configuration which leads me to believe that perhaps the null values implicitly represent zero linear feet. This is further supported by the fact that no other observation has a value equal to zero, which eases away the possibility of just simply being miscalculated data.
+
+```{r lot.frontage}
+min(train$LotFrontage, na.rm = TRUE)
+```
+
+Hence, I will replace the `NA` values with `0`.
+
+```{r lot.front.fill}
+train$LotFrontage[is.na(train$LotFrontage)] = 0
+```
+
+
+`MasVnrArea` unfortunately seems to have both missing values and a lot of `0` values, which raises the question of what the `NA` values even represent. Despite a lot of architectural research, I'm not sure what this could indicate and fall back to the idea that it represents a house where a masonry veneer wall would not be applicable and thus have a value of `0` for the feature.
+
+```{r masvnrarea.fill}
+train$MasVnrArea[is.na(train$MasVnrArea)] = 0
+```
+
+`Electrical` has a missing value which seems quite odd. There doesn't seem to be a clear explanation for why this might be the case so I will fall back to the idea that perhaps this is a house that doesn't have any electrical system set up. Since there aren't many observations in the training data I'm hesitant to toss this observation out and will instead dive deeper into what this observation is.
+
+```{r na.elect.sys.obs}
+train %>% filter(is.na(Electrical))
+```
+
+It seems like this is a fairly new home which is in average quality, has all public utilities, and is in average condition. It doesn't seem obvious for why this observation is missing information on the electrical system. However, most new homes are constructed with similar types of systems.
+
+```{r elec.sys.types, warning=FALSE}
+train %>% filter(YearBuilt > 1995) %>% group_by(Electrical) %>% summarise(Count=n())
+```
+
+From the analysis above it seems that all homes in the training data constructed over a decade ago use a _Standard Circuit Breakers & Romex_. Hence, I will impute the missing value for the observation as such.
+
+```{r electr.imputation}
+train$Electrical[is.na(train$Electrical)] = as.factor("SBrkr")
+```
+
+`GarageYrBlt` represents homes without a garage. While this is a simple fix for the corresponding categorical variables, it's not clear as to what imputed value would suffice for related numerical feature. I believe that this is an important explanatory variable with only a few missing values so rather than toss this feature I'd like to impute the missing values. However, rather than using a mean or simple imputation method, I'll be using **kNN** to better predict what these missing year values should be.
+
+```{r knn.imputation}
+knn.output = knnImputation(select_if(train, is.double) %>% select(-SalePrice) %>% as.matrix(), k = 7)
+imputed.GarageYrsBlt = knn.output %>% as_tibble() %>% select(GarageYrBlt) %>% pull()
+
+train$GarageYrBlt[is.na(train$GarageYrBlt)] = imputed.GarageYrsBlt[is.na(train$GarageYrBlt)]
+```
+
+\newpage
+
+# Splines
+
+```{r}
+train.control = trainControl(method = "cv", number = 10)
+```
+
+
+\newpage
+
+# Ridge
+
+
+\newpage
+
+
+# Lasso
+
+```{r}
+
+```
+
+
+
